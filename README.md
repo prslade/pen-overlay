@@ -8,7 +8,9 @@ git clone https://github.com/prslade/pen-overlay && cd pen-overlay && ./build.sh
 
 Or paste this to your agent:
 
-> Clone https://github.com/prslade/pen-overlay, build it with `./build.sh`, run the built binary with `--selftest`, then launch it.
+```
+Clone https://github.com/prslade/pen-overlay, build it with `./build.sh`, run the built binary with `--selftest`, then launch it.
+```
 
 Hold ⌃⌥ and draw. Options are listed at the top of `PenOverlay.swift`.
 
