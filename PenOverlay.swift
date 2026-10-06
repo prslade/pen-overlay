@@ -1,7 +1,7 @@
 // PenOverlay: draw on top of everything with a pen tablet while screen recording.
 //
-// Hold the chord (default Control+Option) and draw with the pen; strokes hold for a moment, then
-// fade. With the chord released the overlay is fully click-through, so the pen and mouse behave
+// Hold the chord (default Control+Option) and draw with the pen. Everything stays up while you keep
+// drawing, and after you pause it all holds for a moment, then fades together. With the chord released the overlay is fully click-through, so the pen and mouse behave
 // normally. In Wacom Tablet Properties, map an ExpressKey to "Modifier..." with Control+Option so
 // it holds the chord while pressed.
 //
@@ -51,14 +51,34 @@ struct Chord {
 
 // MARK: - Strokes
 
+/// Strokes drawn without a long pause share a session: they stay up together and fade together, so
+/// drawing again resets the timeout for everything on screen, even ink that has started to fade.
+final class Session {
+    var lastActivity: CFTimeInterval
+    var penDown = false
+
+    init(at t: CFTimeInterval) { lastActivity = t }
+
+    /// Fully opaque while the pen is down and for holdSeconds after the last activity, then fades linearly.
+    func alpha(at t: CFTimeInterval) -> CGFloat {
+        if penDown { return 1 }
+        let age = t - lastActivity
+        if age <= holdSeconds { return 1 }
+        return max(0, 1 - CGFloat((age - holdSeconds) / fadeSeconds))
+    }
+}
+
 final class Stroke {
     var points: [CGPoint] = []
     var widths: [CGFloat] = []
     var bounds = CGRect.null
-    var endedAt: CFTimeInterval?
     let color: NSColor
+    let session: Session
 
-    init(color: NSColor) { self.color = color }
+    init(color: NSColor, session: Session) {
+        self.color = color
+        self.session = session
+    }
 
     func append(_ p: CGPoint, _ width: CGFloat) {
         if let last = points.last, hypot(p.x - last.x, p.y - last.y) < 1 { return }
@@ -67,13 +87,7 @@ final class Stroke {
         bounds = bounds.union(CGRect(x: p.x - width, y: p.y - width, width: width * 2, height: width * 2))
     }
 
-    /// Fully opaque while drawing and for holdSeconds after the pen lifts, then fades linearly.
-    func alpha(at t: CFTimeInterval) -> CGFloat {
-        guard let ended = endedAt else { return 1 }
-        let age = t - ended
-        if age <= holdSeconds { return 1 }
-        return max(0, 1 - CGFloat((age - holdSeconds) / fadeSeconds))
-    }
+    func alpha(at t: CFTimeInterval) -> CGFloat { session.alpha(at: t) }
 
     /// The stroke as short straight pieces along a curve through the midpoints of consecutive samples,
     /// with the samples as control points. That rounds corners and jitter, yet the line still ends on
@@ -107,6 +121,7 @@ final class Stroke {
 final class OverlayView: NSView {
     var strokes: [Stroke] = []
     var current: Stroke?
+    private var session: Session?
     var color: NSColor
     var capturing = false
     var now: () -> CFTimeInterval = { CACurrentMediaTime() }
@@ -132,6 +147,7 @@ final class OverlayView: NSView {
     func clear() {
         strokes.removeAll()
         current = nil
+        session = nil
         invalidate()
     }
 
@@ -140,11 +156,8 @@ final class OverlayView: NSView {
     override func mouseDown(with event: NSEvent) {
         guard capturing else { return }
         if eraserActive { clear(); return }   // the pen's eraser end wipes everything
-        let stroke = Stroke(color: color)
-        strokes.append(stroke)
-        current = stroke
+        beginStroke()
         add(event)
-        startTimer()
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -162,15 +175,41 @@ final class OverlayView: NSView {
         let isTablet = event.subtype == .tabletPoint
         let pressure = isTablet ? CGFloat(max(0.05, min(1, event.pressure))) : 1
         let width = isTablet ? baseWidth * (0.3 + 0.9 * pressure) : baseWidth
-        current?.append(point, width)
+        extend(to: point, width: width)
         if logEvents {
             print("event type=\(event.type.rawValue) subtype=\(event.subtype.rawValue) pressure=\(event.pressure) x=\(Int(point.x)) y=\(Int(point.y))")
         }
+    }
+
+    /// Starts a stroke. It joins the current session and restarts its timeout as long as any of its ink
+    /// is still visible, so ink that is mid-fade snaps back to solid. Once everything has faded, it
+    /// starts a fresh session.
+    func beginStroke() {
+        let t = now()
+        let s: Session
+        if let existing = session, existing.alpha(at: t) > 0 {
+            s = existing
+        } else {
+            s = Session(at: t)
+            session = s
+        }
+        s.penDown = true
+        s.lastActivity = t
+        let stroke = Stroke(color: color, session: s)
+        strokes.append(stroke)
+        current = stroke
+        startTimer()
+    }
+
+    func extend(to point: CGPoint, width: CGFloat) {
+        current?.append(point, width)
+        session?.lastActivity = now()
         invalidate()
     }
 
-    private func endStroke() {
-        current?.endedAt = now()
+    func endStroke() {
+        session?.penDown = false
+        session?.lastActivity = now()
         current = nil
     }
 
@@ -185,7 +224,7 @@ final class OverlayView: NSView {
 
     func tick() {
         let t = now()
-        strokes.removeAll { $0.endedAt != nil && $0.alpha(at: t) <= 0 }
+        strokes.removeAll { $0.alpha(at: t) <= 0 }
         invalidate()
         if strokes.isEmpty {
             timer?.invalidate()
@@ -365,7 +404,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func clearAll() { panels.forEach { $0.view.clear() } }
-
     @objc func togglePause() {
         paused.toggle()
         if paused { setActive(false) }
@@ -382,9 +420,8 @@ func selfTest() -> Never {
     var clock: CFTimeInterval = 100
     let view = OverlayView(frame: NSRect(x: 0, y: 0, width: 400, height: 200), color: .red)
     view.now = { clock }
-    let stroke = Stroke(color: .red)
+    let stroke = Stroke(color: .red, session: Session(at: clock))
     for i in 0..<40 { stroke.append(CGPoint(x: 40 + CGFloat(i) * 8, y: 100), 10) }
-    stroke.endedAt = clock
     view.strokes = [stroke]
 
     func alpha(of v: OverlayView, atX x: CGFloat, y: CGFloat) -> CGFloat {
@@ -423,7 +460,7 @@ func selfTest() -> Never {
     // smoothed curve cuts inside it and still ends on the last sample.
     let cornerView = OverlayView(frame: NSRect(x: 0, y: 0, width: 400, height: 200), color: .red)
     cornerView.now = { 100 }
-    let bend = Stroke(color: .red)
+    let bend = Stroke(color: .red, session: Session(at: 100))
     for p in [CGPoint(x: 140, y: 100), CGPoint(x: 200, y: 100), CGPoint(x: 200, y: 160)] { bend.append(p, 10) }
     cornerView.strokes = [bend]
     let corner = alpha(of: cornerView, atX: 200, y: 100)
@@ -432,6 +469,34 @@ func selfTest() -> Never {
     check("curve passes inside the corner", abs(onCurve - strokeOpacity) < 0.03, "alpha \(onCurve)")
     let tip = alpha(of: cornerView, atX: 200, y: 158)
     check("stroke still reaches the pen tip", tip > 0.5, "alpha \(tip)")
+
+    // Drawing again resets the timeout for everything on screen; ink already fading is never revived.
+    var t: CFTimeInterval = 500
+    let sessionView = OverlayView(frame: NSRect(x: 0, y: 0, width: 400, height: 200), color: .red)
+    sessionView.now = { t }
+    func scribble() {
+        sessionView.beginStroke()
+        sessionView.extend(to: CGPoint(x: 50, y: 50), width: 6)
+        sessionView.extend(to: CGPoint(x: 90, y: 70), width: 6)
+        sessionView.endStroke()
+    }
+    scribble()                                   // first stroke ends at t = 500
+    t = 500 + holdSeconds * 0.9
+    scribble()                                   // second stroke, still inside the hold
+    let secondEnded = t
+    t = secondEnded + holdSeconds * 0.9           // 2.7 s after the first stroke, 1.35 s after the second
+    let early = sessionView.strokes[0].alpha(at: t), late = sessionView.strokes[1].alpha(at: t)
+    check("earlier stroke stays up while you keep drawing", early == 1 && late == 1, "alphas \(early), \(late)")
+    t = secondEnded + holdSeconds + fadeSeconds / 2
+    let fadeA = sessionView.strokes[0].alpha(at: t), fadeB = sessionView.strokes[1].alpha(at: t)
+    check("all strokes fade together", abs(fadeA - 0.5) < 0.01 && fadeA == fadeB, "alphas \(fadeA), \(fadeB)")
+    sessionView.beginStroke()                    // start drawing mid-fade: the old ink snaps back to solid
+    let revivedFirst = sessionView.strokes[0].alpha(at: t), revivedNew = sessionView.strokes.last!.alpha(at: t)
+    check("new stroke mid-fade brings old ink back to solid", revivedFirst == 1 && revivedNew == 1, "alphas \(revivedFirst), \(revivedNew)")
+    sessionView.endStroke()
+    t += holdSeconds + fadeSeconds + 0.1
+    sessionView.tick()
+    check("everything is gone after the last pause", sessionView.strokes.isEmpty, "\(sessionView.strokes.count) left")
     exit(failures == 0 ? 0 : 1)
 }
 
