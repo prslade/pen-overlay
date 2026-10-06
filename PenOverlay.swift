@@ -6,7 +6,7 @@
 // it holds the chord while pressed.
 //
 // Env: PENOVERLAY_CHORD (e.g. "ctrl+opt", "cmd+shift"), PENOVERLAY_HOLD, PENOVERLAY_FADE (seconds),
-//      PENOVERLAY_WIDTH (points).
+//      PENOVERLAY_WIDTH (points), PENOVERLAY_OPACITY (0 to 1).
 // Flags: --log-events (print what the pen reports), --selftest (render and fade checks, then exit).
 
 import AppKit
@@ -16,7 +16,8 @@ let environment = ProcessInfo.processInfo.environment
 func tunable(_ key: String, _ fallback: Double) -> Double { environment[key].flatMap(Double.init) ?? fallback }
 let holdSeconds = tunable("PENOVERLAY_HOLD", 1.5)   // a finished stroke stays fully visible this long
 let fadeSeconds = tunable("PENOVERLAY_FADE", 0.8)   // then fades out over this long
-let baseWidth = CGFloat(tunable("PENOVERLAY_WIDTH", 6))
+let baseWidth = CGFloat(tunable("PENOVERLAY_WIDTH", 3.5))
+let strokeOpacity = CGFloat(tunable("PENOVERLAY_OPACITY", 0.85))   // 1 = solid
 let logEvents = CommandLine.arguments.contains("--log-events")
 
 // MARK: - Chord
@@ -72,6 +73,32 @@ final class Stroke {
         let age = t - ended
         if age <= holdSeconds { return 1 }
         return max(0, 1 - CGFloat((age - holdSeconds) / fadeSeconds))
+    }
+
+    /// The stroke as short straight pieces along a curve through the midpoints of consecutive samples,
+    /// with the samples as control points. That rounds corners and jitter, yet the line still ends on
+    /// the pen tip, so there is no lag. Width eases between samples instead of stepping.
+    func segments() -> [(from: CGPoint, to: CGPoint, width: CGFloat)] {
+        let n = points.count
+        guard n >= 2 else { return [] }
+        func mid(_ a: CGPoint, _ b: CGPoint) -> CGPoint { CGPoint(x: (a.x + b.x) / 2, y: (a.y + b.y) / 2) }
+        var out = [(from: CGPoint, to: CGPoint, width: CGFloat)]()
+        out.append((points[0], mid(points[0], points[1]), widths[0]))
+        for i in 1..<(n - 1) {
+            let a = mid(points[i - 1], points[i]), b = mid(points[i], points[i + 1]), c = points[i]
+            let w0 = (widths[i - 1] + widths[i]) / 2, w1 = (widths[i] + widths[i + 1]) / 2
+            let steps = max(1, min(12, Int((hypot(b.x - a.x, b.y - a.y) / 1.5).rounded(.up))))
+            var prev = a
+            for s in 1...steps {
+                let t = CGFloat(s) / CGFloat(steps), u = 1 - t
+                let p = CGPoint(x: u * u * a.x + 2 * u * t * c.x + t * t * b.x,
+                                y: u * u * a.y + 2 * u * t * c.y + t * t * b.y)
+                out.append((prev, p, w0 + (w1 - w0) * ((CGFloat(s) - 0.5) / CGFloat(steps))))
+                prev = p
+            }
+        }
+        out.append((mid(points[n - 2], points[n - 1]), points[n - 1], widths[n - 1]))
+        return out
     }
 }
 
@@ -189,27 +216,21 @@ final class OverlayView: NSView {
             let alpha = stroke.alpha(at: t)
             guard alpha > 0, !stroke.points.isEmpty, stroke.bounds.intersects(dirtyRect) else { continue }
             ctx.saveGState()
-            ctx.setAlpha(alpha)
+            ctx.setAlpha(alpha * strokeOpacity)
             ctx.beginTransparencyLayer(auxiliaryInfo: nil)   // fade the whole stroke as one, no joint darkening
             ctx.setLineCap(.round)
             ctx.setLineJoin(.round)
-            for pass in 0..<2 {   // white halo first so strokes read on any background, then the color
-                let paint = pass == 0 ? NSColor.white.withAlphaComponent(0.9) : stroke.color
-                let extra: CGFloat = pass == 0 ? 3 : 0
-                ctx.setStrokeColor(paint.cgColor)
-                ctx.setFillColor(paint.cgColor)
-                for i in stroke.points.indices {
-                    let p = stroke.points[i]
-                    if i == 0 {
-                        let w = stroke.widths[0] + extra
-                        ctx.fillEllipse(in: CGRect(x: p.x - w / 2, y: p.y - w / 2, width: w, height: w))
-                    } else {
-                        ctx.setLineWidth((stroke.widths[i - 1] + stroke.widths[i]) / 2 + extra)
-                        ctx.move(to: stroke.points[i - 1])
-                        ctx.addLine(to: p)
-                        ctx.strokePath()
-                    }
-                }
+            ctx.setStrokeColor(stroke.color.cgColor)
+            ctx.setFillColor(stroke.color.cgColor)
+            if stroke.points.count == 1 {   // a tap is a dot
+                let p = stroke.points[0], w = stroke.widths[0]
+                ctx.fillEllipse(in: CGRect(x: p.x - w / 2, y: p.y - w / 2, width: w, height: w))
+            }
+            for piece in stroke.segments() {
+                ctx.setLineWidth(piece.width)
+                ctx.move(to: piece.from)
+                ctx.addLine(to: piece.to)
+                ctx.strokePath()
             }
             ctx.endTransparencyLayer()
             ctx.restoreGState()
@@ -366,13 +387,14 @@ func selfTest() -> Never {
     stroke.endedAt = clock
     view.strokes = [stroke]
 
-    func alpha(atX x: CGFloat, y: CGFloat) -> CGFloat {
-        guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return -1 }
-        view.cacheDisplay(in: view.bounds, to: rep)
-        let px = Int(CGFloat(rep.pixelsWide) * x / view.bounds.width)
-        let py = Int(CGFloat(rep.pixelsHigh) * (1 - y / view.bounds.height))
+    func alpha(of v: OverlayView, atX x: CGFloat, y: CGFloat) -> CGFloat {
+        guard let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) else { return -1 }
+        v.cacheDisplay(in: v.bounds, to: rep)
+        let px = Int(CGFloat(rep.pixelsWide) * x / v.bounds.width)
+        let py = Int(CGFloat(rep.pixelsHigh) * (1 - y / v.bounds.height))
         return rep.colorAt(x: px, y: py)?.alphaComponent ?? -1
     }
+    func alpha(atX x: CGFloat, y: CGFloat) -> CGFloat { alpha(of: view, atX: x, y: y) }
 
     var failures = 0
     func check(_ name: String, _ ok: Bool, _ detail: String) {
@@ -381,10 +403,10 @@ func selfTest() -> Never {
     }
 
     let held = alpha(atX: 200, y: 100)
-    check("stroke opaque while held", held > 0.95, "alpha \(held)")
+    check("stroke at full strength while held", abs(held - strokeOpacity) < 0.03, "alpha \(held), expected \(strokeOpacity)")
     clock += holdSeconds + fadeSeconds / 2
     let half = alpha(atX: 200, y: 100)
-    check("stroke half faded midway", half > 0.4 && half < 0.6, "alpha \(half)")
+    check("stroke half faded midway", abs(half - strokeOpacity / 2) < 0.05, "alpha \(half), expected \(strokeOpacity / 2)")
     clock += fadeSeconds
     let gone = alpha(atX: 200, y: 100)
     check("stroke gone after fade", gone == 0, "alpha \(gone)")
@@ -396,6 +418,20 @@ func selfTest() -> Never {
     view.needsDisplay = true
     let tint = alpha(atX: 10, y: 10)
     check("capturing overlay has click-catching tint", tint > 0.005 && tint < 0.03, "alpha \(tint)")
+
+    // A right-angle corner with wide spacing: a sharp polyline would cover the corner point, the
+    // smoothed curve cuts inside it and still ends on the last sample.
+    let cornerView = OverlayView(frame: NSRect(x: 0, y: 0, width: 400, height: 200), color: .red)
+    cornerView.now = { 100 }
+    let bend = Stroke(color: .red)
+    for p in [CGPoint(x: 140, y: 100), CGPoint(x: 200, y: 100), CGPoint(x: 200, y: 160)] { bend.append(p, 10) }
+    cornerView.strokes = [bend]
+    let corner = alpha(of: cornerView, atX: 200, y: 100)
+    check("corner is rounded off", corner < 0.1, "alpha \(corner) at the sample point")
+    let onCurve = alpha(of: cornerView, atX: 195, y: 105)
+    check("curve passes inside the corner", abs(onCurve - strokeOpacity) < 0.03, "alpha \(onCurve)")
+    let tip = alpha(of: cornerView, atX: 200, y: 158)
+    check("stroke still reaches the pen tip", tip > 0.5, "alpha \(tip)")
     exit(failures == 0 ? 0 : 1)
 }
 
