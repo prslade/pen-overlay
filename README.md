@@ -2,6 +2,8 @@
 
 Draw on your screen with a pen tablet while screen recording. Strokes hold for a moment, then fade. A macOS menu-bar app in one Swift file.
 
+![pen-overlay demo: strokes drawn with a pen hold, then fade](docs/demo.gif)
+
 ```
 git clone https://github.com/prslade/pen-overlay && cd pen-overlay && ./build.sh && open build/PenOverlay.app
 ```
