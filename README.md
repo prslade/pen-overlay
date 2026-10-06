@@ -17,3 +17,9 @@ Clone https://github.com/prslade/pen-overlay, build it with `./build.sh`, run th
 Hold ⌃⌥ and draw. Options are listed at the top of `PenOverlay.swift`.
 
 Needs the Xcode Command Line Tools (`xcode-select --install`).
+
+To update, paste this to your agent:
+
+```
+Find my pen-overlay clone, run `git pull`, quit the running PenOverlay, rebuild with `./build.sh`, and relaunch it.
+```
