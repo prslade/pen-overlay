@@ -16,6 +16,8 @@ Clone https://github.com/prslade/pen-overlay, build it with `./build.sh`, run th
 
 Hold ⌃⌥ and draw. Options are listed at the top of `PenOverlay.swift`.
 
+To keep drawings up instead of fading them, turn on **Keep drawings until trashed** in the menu-bar menu. While there is ink on screen, the macOS Trash appears in the bottom-right corner (drag it wherever you like); double-click it and everything is pulled in.
+
 Needs the Xcode Command Line Tools (`xcode-select --install`).
 
 To update, paste this to your agent:
