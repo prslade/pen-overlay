@@ -8,12 +8,17 @@
 // Menu > "Keep drawings until trashed" stops the fade. While there is ink, the macOS Trash sits in the
 // bottom-right corner (drag it anywhere); double-click it and everything is pulled in.
 //
+// Menu > "Open at login" adds the app to System Settings > General > Login Items. Install it first
+// (`./build.sh install`) so the login item points at a copy that a rebuild does not delete.
+//
 // Env: PENOVERLAY_CHORD (e.g. "ctrl+opt", "cmd+shift"), PENOVERLAY_HOLD, PENOVERLAY_FADE (seconds),
 //      PENOVERLAY_WIDTH (points), PENOVERLAY_OPACITY (0 to 1).
-// Flags: --log-events (print what the pen reports), --selftest (render and fade checks, then exit).
+// Flags: --log-events (print what the pen reports), --selftest (render and fade checks, then exit),
+//        --open-at-login on|off|status (change or print the login item, then exit).
 
 import AppKit
 import QuartzCore
+import ServiceManagement
 
 let environment = ProcessInfo.processInfo.environment
 func tunable(_ key: String, _ fallback: Double) -> Double { environment[key].flatMap(Double.init) ?? fallback }
@@ -526,10 +531,40 @@ let palette: [(name: String, color: NSColor)] = [
     ("Pink", NSColor(srgbRed: 1.00, green: 0.18, blue: 0.57, alpha: 1)),
 ]
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+// MARK: - Login item
+
+/// Launch at login through the system's Login Items list, so it can also be switched off in System Settings.
+enum LoginItem {
+    static var status: SMAppService.Status { SMAppService.mainApp.status }
+
+    /// `.mixed` means the item is registered but switched off in System Settings, waiting for approval.
+    static var menuState: NSControl.StateValue {
+        switch status {
+        case .enabled: return .on
+        case .requiresApproval: return .mixed
+        default: return .off
+        }
+    }
+
+    static func set(_ on: Bool) throws {
+        if on && status != .enabled { try SMAppService.mainApp.register() }
+        if !on && status != .notRegistered { try SMAppService.mainApp.unregister() }
+    }
+
+    static var label: String {
+        switch status {
+        case .enabled: return "on"
+        case .requiresApproval: return "needs approval in System Settings > General > Login Items"
+        default: return "off"
+        }
+    }
+}
+
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let chord = Chord(environment["PENOVERLAY_CHORD"] ?? "ctrl+opt")
     var panels: [(panel: OverlayPanel, view: OverlayView)] = []
     var statusItem: NSStatusItem!
+    var loginItem: NSMenuItem?
     var trash: (panel: OverlayPanel, view: TrashView)?
     var trashShown = false
     var colorIndex = UserDefaults.standard.integer(forKey: "colorIndex")
@@ -657,8 +692,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pause.target = self
         menu.addItem(pause)
         menu.addItem(.separator())
+        let login = NSMenuItem(title: "Open at login", action: #selector(toggleLogin), keyEquivalent: "")
+        login.target = self
+        login.state = LoginItem.menuState
+        loginItem = login
+        menu.addItem(login)
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        menu.delegate = self
         statusItem.menu = menu
+    }
+
+    /// The login item can also change in System Settings, so read it again each time the menu opens.
+    func menuNeedsUpdate(_ menu: NSMenu) { loginItem?.state = LoginItem.menuState }
+
+    @objc func toggleLogin() {
+        do {
+            try LoginItem.set(LoginItem.status != .enabled)
+        } catch {
+            NSApp.activate(ignoringOtherApps: true)
+            NSAlert(error: error).runModal()
+        }
+        if LoginItem.status == .requiresApproval { SMAppService.openSystemSettingsLoginItems() }
+        loginItem?.state = LoginItem.menuState
     }
 
     @objc func pickColor(_ sender: NSMenuItem) {
@@ -870,6 +925,19 @@ func selfTest() -> Never {
 // MARK: - Entry
 
 if CommandLine.arguments.contains("--selftest") { selfTest() }
+if let flag = CommandLine.arguments.firstIndex(of: "--open-at-login") {
+    let value = CommandLine.arguments.dropFirst(flag + 1).first
+    guard let value = value, ["on", "off", "status"].contains(value) else {
+        print("usage: PenOverlay --open-at-login on|off|status")
+        exit(2)
+    }
+    do { if value != "status" { try LoginItem.set(value == "on") } } catch {
+        print("could not change the login item: \(error.localizedDescription)")
+        exit(1)
+    }
+    print("open at login: \(LoginItem.label)")
+    exit(0)
+}
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 let delegate = AppDelegate()

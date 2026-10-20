@@ -1,5 +1,7 @@
 #!/bin/zsh
 # Builds build/PenOverlay.app (menu-bar only, no Dock icon). Run with: open build/PenOverlay.app
+# `./build.sh install` also copies it to ~/Applications (or $PENOVERLAY_INSTALL_DIR) so it opens from
+# Spotlight and can be added to Login Items. A copy that is already running is left alone.
 set -e
 cd "$(dirname "$0")"
 APP=build/PenOverlay.app
@@ -22,3 +24,14 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 PLIST
 codesign --force --sign - "$APP"
 echo "built $APP"
+
+if [[ "$1" == install ]]; then
+  DEST="${PENOVERLAY_INSTALL_DIR:-$HOME/Applications}"
+  mkdir -p "$DEST"
+  rm -rf "$DEST/PenOverlay.app"
+  ditto "$APP" "$DEST/PenOverlay.app"
+  echo "installed $DEST/PenOverlay.app"
+  if pgrep -x PenOverlay >/dev/null; then
+    echo "PenOverlay is running; quit it and reopen it to get this build"
+  fi
+fi
