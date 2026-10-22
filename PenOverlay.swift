@@ -340,8 +340,17 @@ final class OverlayPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
+/// One point short of the display on every side. A window that covers the whole display, even a fully
+/// transparent one, makes Mission Control draw the Spaces bar thumbnails (Desktop 1, Desktop 2) as bare
+/// wallpaper for every space the window is in, and this one is in all of them. Window level and collection
+/// behavior make no difference; a window a point smaller does not trigger it.
+func overlayFrame(for screenFrame: NSRect) -> NSRect {
+    screenFrame.insetBy(dx: 1, dy: 1)
+}
+
 func makePanel(for screen: NSScreen, color: NSColor) -> (OverlayPanel, OverlayView) {
-    let panel = OverlayPanel(contentRect: screen.frame, styleMask: [.borderless, .nonactivatingPanel],
+    let frame = overlayFrame(for: screen.frame)
+    let panel = OverlayPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel],
                              backing: .buffered, defer: false)
     panel.level = .screenSaver
     panel.isOpaque = false
@@ -351,9 +360,9 @@ func makePanel(for screen: NSScreen, color: NSColor) -> (OverlayPanel, OverlayVi
     panel.hidesOnDeactivate = false
     panel.isReleasedWhenClosed = false
     panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
-    let view = OverlayView(frame: NSRect(origin: .zero, size: screen.frame.size), color: color)
+    let view = OverlayView(frame: NSRect(origin: .zero, size: frame.size), color: color)
     panel.contentView = view
-    panel.setFrame(screen.frame, display: true)
+    panel.setFrame(frame, display: true)
     panel.orderFrontRegardless()
     return (panel, view)
 }
@@ -627,7 +636,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let f = trash.panel.frame
         let mouth = CGPoint(x: f.midX, y: f.minY + f.height * 0.72)   // the bin's rim, where the ink goes in
         let pulled = panels.map { entry -> Bool in
-            let o = entry.panel.frame.origin   // each overlay is as big as its screen, so global minus origin is local
+            let o = entry.panel.frame.origin   // each overlay's view fills its panel, so global minus origin is local
             return entry.view.suckUp(into: CGPoint(x: mouth.x - o.x, y: mouth.y - o.y))
         }
         if pulled.contains(true) { trash.view.play() }
@@ -849,6 +858,14 @@ func selfTest() -> Never {
     inkClock += holdSeconds * 0.5 + fadeSeconds + 0.1
     kept.tick()
     check("then the ink fades away", kept.strokes.isEmpty, "\(kept.strokes.count) left")
+
+    // The overlay must not cover its whole display, or Mission Control blanks the Desktop thumbnails.
+    let display = NSRect(x: -1440, y: 0, width: 1512, height: 982)
+    let cover = overlayFrame(for: display)
+    check("overlay stays inside its display", display.contains(cover), "\(cover) in \(display)")
+    check("overlay does not cover the whole display", cover != display && cover.width < display.width && cover.height < display.height, "\(cover.size) vs \(display.size)")
+    check("overlay gives up at most a point per side", cover.minX - display.minX <= 1 && display.maxX - cover.maxX <= 1
+          && cover.minY - display.minY <= 1 && display.maxY - cover.maxY <= 1, "origin \(cover.origin), size \(cover.size)")
 
     // Emptying the trash: the ink moves toward the can, then is gone.
     let pulled = inkedView()
