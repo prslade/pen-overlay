@@ -18,7 +18,7 @@ To install it as an app, run `./build.sh install`. That copies it to `~/Applicat
 
 Hold ⌃⌥ and draw. Options are listed at the top of `PenOverlay.swift`.
 
-To keep drawings up instead of fading them, turn on **Keep drawings until trashed** in the menu-bar menu. While there is ink on screen, the macOS Trash appears in the bottom-right corner (drag it wherever you like); double-click it and everything is pulled in.
+To keep drawings up instead of fading them, turn on **Keep drawings until trashed** in the menu-bar menu. While there is ink on screen, the macOS Trash appears in the bottom-right corner (drag it wherever you like); double-click it and everything is pulled in. Or press ⌃⌥⌫ from any app (your chord plus Delete); with keep mode off it just clears the screen.
 
 Needs the Xcode Command Line Tools (`xcode-select --install`).
 
