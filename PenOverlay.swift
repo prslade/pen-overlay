@@ -6,7 +6,8 @@
 // it holds the chord while pressed.
 //
 // Menu > "Keep drawings until trashed" stops the fade. While there is ink, the macOS Trash sits in the
-// bottom-right corner (drag it anywhere); double-click it and everything is pulled in.
+// bottom-right corner (drag it anywhere); double-click it and everything is pulled in. Pressing Delete
+// while holding the chord (⌃⌥⌫ by default) does the same from anywhere; outside keep mode it just clears.
 //
 // Menu > "Open at login" adds the app to System Settings > General > Login Items. Install it first
 // (`./build.sh install`) so the login item points at a copy that a rebuild does not delete.
@@ -19,6 +20,7 @@
 import AppKit
 import QuartzCore
 import ServiceManagement
+import Carbon.HIToolbox
 
 let environment = ProcessInfo.processInfo.environment
 func tunable(_ key: String, _ fallback: Double) -> Double { environment[key].flatMap(Double.init) ?? fallback }
@@ -54,8 +56,47 @@ struct Chord {
         self.label = names.joined()
     }
 
+    /// The same modifiers for RegisterEventHotKey. fn has no Carbon equivalent, so it is left out.
+    var carbonModifiers: UInt32 {
+        var m: UInt32 = 0
+        if flags.contains(.maskControl) { m |= UInt32(controlKey) }
+        if flags.contains(.maskAlternate) { m |= UInt32(optionKey) }
+        if flags.contains(.maskCommand) { m |= UInt32(cmdKey) }
+        if flags.contains(.maskShift) { m |= UInt32(shiftKey) }
+        return m
+    }
+
     /// True while exactly these modifiers are down. Reads global key state, so it needs no permission.
     var isHeld: Bool { CGEventSource.flagsState(.combinedSessionState).intersection(Chord.mask) == flags }
+}
+
+/// A system-wide shortcut through Carbon's RegisterEventHotKey, which (unlike a key-event monitor) needs
+/// no Accessibility permission and never takes focus from the app being recorded.
+final class HotKey {
+    private var ref: EventHotKeyRef?
+    private var handler: EventHandlerRef?
+    private let action: () -> Void
+
+    init?(keyCode: Int, modifiers: UInt32, action: @escaping () -> Void) {
+        self.action = action
+        var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+        let me = Unmanaged.passUnretained(self).toOpaque()
+        guard InstallEventHandler(GetApplicationEventTarget(), { _, _, userData in
+            guard let userData = userData else { return OSStatus(eventNotHandledErr) }
+            Unmanaged<HotKey>.fromOpaque(userData).takeUnretainedValue().action()
+            return noErr
+        }, 1, &spec, me, &handler) == noErr else { return nil }
+        let id = EventHotKeyID(signature: OSType(0x50454E4F), id: 1)   // "PENO"
+        guard RegisterEventHotKey(UInt32(keyCode), modifiers, id, GetApplicationEventTarget(), 0, &ref) == noErr else {
+            if let handler = handler { RemoveEventHandler(handler) }
+            return nil
+        }
+    }
+
+    deinit {
+        if let ref = ref { UnregisterEventHotKey(ref) }
+        if let handler = handler { RemoveEventHandler(handler) }
+    }
 }
 
 // MARK: - Strokes
@@ -580,6 +621,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var keep = UserDefaults.standard.bool(forKey: "keepDrawings")
     var active = false
     var paused = false
+    var clearKey: HotKey?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         if !palette.indices.contains(colorIndex) { colorIndex = 0 }
@@ -592,6 +634,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                                name: NSApplication.didChangeScreenParametersNotification, object: nil)
         let poll = Timer(timeInterval: 1.0 / 30, repeats: true) { [weak self] _ in self?.pollChord() }
         RunLoop.main.add(poll, forMode: .common)
+        clearKey = HotKey(keyCode: kVK_Delete, modifiers: chord.carbonModifiers) { [weak self] in self?.sweep() }
+        if clearKey == nil { print("could not register \(chord.label)⌫; it may be taken by another app") }
+    }
+
+    /// The clear shortcut: in keep mode the ink goes into the trash as if it were double-clicked, otherwise it is wiped.
+    @objc func sweep() {
+        if trash != nil { emptyTrash() } else { clearAll() }
     }
 
     func buildPanels() {
@@ -693,7 +742,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         keepItem.target = self
         keepItem.state = keep ? .on : .off
         menu.addItem(keepItem)
-        let clear = NSMenuItem(title: "Clear", action: #selector(clearAll), keyEquivalent: "")
+        let clear = NSMenuItem(title: "Clear (\(chord.label)⌫)", action: #selector(sweep), keyEquivalent: "")
         clear.target = self
         menu.addItem(clear)
         let pause = NSMenuItem(title: paused ? "Resume" : "Pause (pen acts as a normal cursor)",
